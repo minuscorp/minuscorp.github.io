@@ -3,8 +3,6 @@ layout: post
 title: About State Machines on iOS Development.
 ---
 
-# Introduction
-
 In Computer Science we get introduced to the **formal computational perspective to know what can (and what cannot) a computer do**.
 
 For this purpose we **utilize** mathematical tools, like logic and linguistics, **formalize** the problem resolution methods and **obtain** abstract languages models, from computers and from computing processes.
@@ -166,38 +164,184 @@ class RequestContactsAccess: Action {
 
 - `Action`s are free of have some pieces of information attached to them, that's why **Mini** provides the user with two main utility protocols: `CompletableAction`, `EmptyAction` and `KeyedPayloadAction`.
 
-    - A `CompletableAction` is a specialization of the `Action` protocol, which allows the user attach both a `Task` and some kind of object that gets fulfilled when the `Task` succeeds.
+ - A `CompletableAction` is a specialization of the `Action` protocol, which allows the user attach both a `Task` and some kind of object that gets fulfilled when the `Task` succeeds.
 
-    ```swift
-    class RequestContactsAccessResult: CompletableAction {
+```swift
+struct RequestContactsAccessResult: CompletableAction {
 
-      let requestContactsAccessPromise: Promise<Bool?>
+    let promise: Promise<Bool?>
 
-      typealias Payload = Bool
+    typealias Payload = Bool
+}
+```
 
-      required init(promise: Promise<Bool?>) {
-          self.requestContactsAccessPromise = promise
-      }
+- An `EmptyAction` is a specialization of `CompletableAction` where the `Payload` is a `Swift.Void`, this means it only has associated a `Promise<Void>`.
+
+```swift
+struct ActivateVoucherLoaded: EmptyAction {
+
+    let promise: Promise<Void>
+}
+```
+
+- A `KeyedPayloadAction`, adds a `Key` (which is `Hashable`) to the `CompletableAction`. This is a special case where the same `Action` produces results that can be grouped together, tipically, under a `Dictionary` (i.e., an `Action` to search contacts, and grouped by their main phone number).
+
+```swift
+struct RequestContactLoadedAction: KeyedCompletableAction {
+
+    typealias Payload = CNContact
+    typealias Key = String
+
+    let promise: [Key: Promise<Payload?>]
+}
+```
+
+### Store
+
+- A `Store` is the hub where decissions and side-efects are made through the ingoing and outgoing `Action`s. A `Store` is a generic class to inherit from and associate a `State` for it.
+
+- A `Store` may produce `State` changes that can be observed like any other **RxSwift**'s `Observable`. In this way a `View`, or any other object of your choice, can receive new `State`s produced by a certain `Store`.
+
+- A `Store` reduces the flow of a certain amount of `Action`s through the `var reducerGroup: ReducerGroup` property.
+
+- The `Store` is implemented in a way that has two generic requirements, a `State: StateType` and a `StoreController: Disposable`. The `StoreController` is usually a class that contains the logic to perform the `Actions` that might be intercepted by the store, i.e, a group of URL requests, perform a database query, etc.
+
+- Through generic specialization, the `reducerGroup` variable can be rewritten for each case of pair `State` and `StoreController` without the need of subclassing the `Store`.
+
+```swift
+extension Store where State == TestState, StoreController == TestStoreController {
+
+    var reducerGroup: ReducerGroup
+        ReducerGroup(
+            Reducer(of: OneTestAction.self, on: self.dispatcher) { action in
+                self.state = self.state.copy(testPromise: *.value(action.counter))
+            }
+        )
     }
-    ```
-    - An `EmptyAction` is a specialization of `CompletableAction` where the `Payload` is a `Swift.Never`, this means it only has associated a `Promise<Never>`.
+}
+```
 
-    ```swift
-    struct ActivateVoucherLoaded: EmptyAction {
+- In the snippet above, we have a complete example of how a `Store` would work. We use the `ReducerGroup` to indicate how the `Store` will intercept `Action`s of type `OneTestAction` and that everytime it gets intercepted, the `Store`'s `State` gets copied (is not black magic 🧙‍, is through a set of [Sourcery](https://github.com/krzysztofzablocki/Sourcery) templates that are distributed with the package).
 
-      let promise: Promise<Void>
+- When working with `Store` instances, you may retain a strong reference of its `reducerGroup`, this is done using the `subscribe()`  method, which is a `Disposable` that can be used like below:
+
+```swift
+var bag = DisposeBag()
+let store = Store<TestState, TestStoreController>(TestState(), dispatcher: dispatcher, storeController: TestStoreController())
+store
+    .subscribe()
+    .disposed(by: bag)
+```
+
+### Dispatcher
+
+- The last piece of the architecture is the `Dispatcher`. In an application scope, there should be only one `Dispatcher` alive from which every action is being dispatched.
+
+```swift
+let action = TestAction()
+dispatcher.dispatch(action, mode: .sync)
+```
+
+- With one line, we can notify every `Store` which has defined a reducer for that type of `Action`.
+
+### Advanced usage
+
+- **Mini** is built over a request-response unidirectional flow. This is achieved using pair of `Action`, one for making the request of a change in a certain `State`, and another `Action` to mutate the `State` over the result of the operation being made.
+
+- This is much simplier to explain with a code example:
+
+```swift
+// We define our state in first place:
+struct TestState: StateType {
+    // Our state is defined over the Promise of an Integer type.
+    let counter: Promise<Int>
+
+    init(counter: Promise<Int> = .idle()) {
+        self.counter = counter
     }
-    ```
-    - A `KeyedPayloadAction`, adds a `Key` (which is `Hashable`) to the `CompletableAction`. This is a special case where the same `Action` produces results that can be grouped together, tipically, under a `Dictionary` (i.e., an `Action` to search contacts, and grouped by their main phone number).
 
-    ```swift
-    struct RequestContactLoadedAction: KeyedCompletableAction {
-
-      typealias Payload = CNContact
-      typealias Key = String
-
-      let promise: [Key: Promise<Payload?>]
+    public func isEqual(to other: StateType) -> Bool {
+        guard let state = other as? TestState else { return false }
+        guard counter == state.counter else { return false }
+        return true
     }
-    ```
+}
 
+// We define our actions, one of them represents the request of a change, the other one the response of that change requested.
 
+// This is the request
+class SetCounterAction: Action {
+
+    let counter: Int
+
+    init(counter: Int) {
+        self.counter = counter
+    }
+}
+
+// This is the response
+class SetCounterActionLoaded: Action {
+    
+    let counter: Int
+    
+    init(counter: Int) {
+        self.counter = counter
+    }
+}
+
+// As you can see, both seems to be the same, same parameters, initializer, etc. But next, we define our StoreController.
+
+// The StoreController define the side-effects that an Action might trigger.
+class TestStoreController: Disposable {
+    
+    let dispatcher: Dispatcher
+    
+    init(dispatcher: Dispatcher) {
+        self.dispatcher = dispatcher
+    }
+    
+    // This function dispatches (always in a async mode) the result of the operation, just giving out the number to the dispatcher.
+    func counter(_ number: Int) {
+        self.dispatcher.dispatch(SetCounterActionLoaded(counter: number), mode: .async)
+    }
+    
+    public func dispose() {
+        // NO-OP
+    }
+}
+
+// Last, but not least, the Store definition with the Reducers
+extension Store where State == TestState, StoreController == TestStoreController {
+
+    var reducerGroup: ReducerGroup {
+        ReducerGroup(
+          // We set the state with a Promise as .pending, someone has to fill the requirement later on. This represents the Request.
+            Reducer(of: SetCounterAction.self, on: self.dispatcher) { action in
+                guard !self.state.counter.isOnProgress else { return }
+                self.state = TestState(counter: .pending())
+                self.storeController.counter(action.counter)
+            },
+          // Next we receive the Action dispatched by the StoreController with a result, we must fulfill our Promise and notify the store for the State change. This represents the Response.
+            Reducer(of: SetCounterActionLoaded.self, on: self.dispatcher) { action in
+                self.state.counter
+                    .fulfill(action.counter)
+                    .notify(to: self)
+            }
+        )
+    }
+}
+```
+
+#### Documentation
+
+All the documentation available can be found **[here](http://opensource.bq.com/mini-swift/docs/)**
+
+# Recap
+
+We have described how an _automata_ can be represented in a formal or mathematical way, but it can be used in computed development to make predictable the behavior of a computer application.
+
+_Why is this possible?_ Because given a state `A` and we want the application to be in a state `B` we can only execute an action `X` which makes `A - X -> B` and there is no other action in the application to reach this goal.
+
+For record, we can log every state and action change in the application and rewind all the effects to reach the initial state named `A`.
+
+This kind of behavior makes predictable that every user interaction which produces and action and, therefore, a state change in the application is deterministic and cloned in any further environment with the same semantics.
